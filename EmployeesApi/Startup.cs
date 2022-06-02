@@ -1,64 +1,77 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using Autofac;
-using Autofac.Extensions.DependencyInjection;
+﻿using Employees.DataStore.DependencyInjection;
+using Employees.DataStoreMigrations;
+using EmployeesApi.Config;
 using EmployeesApi.Db;
+using EmployeesApi.DependencyInjection;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.HttpsPolicy;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Hosting;
+using Microsoft.OpenApi.Models;
+using Serilog;
+using Swashbuckle.AspNetCore.Filters;
 
 namespace EmployeesApi
 {
     public class Startup
     {
-        public Startup(IConfiguration configuration)
+        public Startup(IConfiguration configuration, IHostEnvironment environment)
         {
-            Configuration = configuration;
+            _configuration = configuration;
+            _environment   = environment;
         }
 
-        public IConfiguration Configuration { get; }
+        private readonly IConfiguration   _configuration;
+        private readonly IHostEnvironment _environment;
 
-        public IServiceProvider ConfigureServices(IServiceCollection services)
+        public void ConfigureServices(IServiceCollection services)
         {
-            services.AddMvc().SetCompatibilityVersion(CompatibilityVersion.Version_2_1);
+            services.AddEmployeeApiServices();
+            services.AddEmployeeApiAuthentication(_configuration);
 
-            var builder = new ContainerBuilder();
-            builder.RegisterType<EFEmployeeRepository>().As<IEmployeeRepository>();
+            services.AddApplicationDataStore(_configuration, _environment.IsProduction(), typeof(ApplicationDbContextFactory).Assembly.GetName().Name);
+
+            services.AddControllers();
+            services.AddSwaggerGen(options =>
+            {
+                options.SwaggerDoc("v1", new OpenApiInfo { Title = "EmployeesApi", Version = "v1" });
+                options.AddSecurityDefinition(JwtBearerDefaults.AuthenticationScheme, new OpenApiSecurityScheme
+                {
+                    Description = "Standard Authorization header using the Bearer scheme. Example: \"Bearer {token}\"",
+                    In          = ParameterLocation.Header,
+                    Name        = JwtBearerDefaults.AuthenticationScheme,
+                    Type        = SecuritySchemeType.ApiKey
+                });
+                options.OperationFilter<SecurityRequirementsOperationFilter>();
+                options.OperationFilter<AddResponseHeadersFilter>();
+            });
             
-            services.AddDbContext<ApplicationDbContext>(o => o.UseMySql("Server=localhost;port=3306;Database=employees;Uid=root;Pwd=root;"));
-            
-
-            builder.Populate(services);
-
-            var container = builder.Build();            
-
-            return new AutofacServiceProvider(container);
+            services.AddOptions<JwtOptions>().Bind(_configuration.GetSection("Jwt"));
         }
-
-        public void Configure(IApplicationBuilder app, IHostingEnvironment env)
+        
+        public void Configure(IApplicationBuilder app, ApplicationDbContext context, IWebHostEnvironment env)
         {
             if (env.IsDevelopment())
             {
                 app.UseDeveloperExceptionPage();
+                app.UseSwagger();
+                app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "EmployeesApi v1"));
             }
-            else
-            {
-                app.UseHsts();
-            }
+            
+            context.Database.Migrate();
 
+            app.UseSerilogRequestLogging();
             app.UseHttpsRedirection();
-            app.UseMvc();
+            app.UseRouting();
+            app.UseAuthorization();
 
-            var DB = app.ApplicationServices.GetRequiredService<ApplicationDbContext>();
-            DB.Database.EnsureCreated();
+            app.UseEndpoints(endpoints =>
+            {
+                endpoints.MapControllers();
+            });
         }
     }
 }
